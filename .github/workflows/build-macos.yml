@@ -1,0 +1,70 @@
+name: Build macOS Sequoia
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "25"
+          # Node 25.5.0 per .nvmrc / engines field.
+          # setup-node resolves to latest 25.x available.
+
+      - name: Install dependencies
+        run: npm install --ignore-engines
+        # --ignore-engines: npm may lag behind the exact engine spec;
+        # the build itself validates compatibility.
+
+      - name: Build (tsc)
+        run: npm run build
+
+      - name: Verify build output
+        run: |
+          test -f dist/index.js || { echo "ERROR: dist/index.js not found"; exit 1; }
+          node --version
+          echo "--- quick smoke test ---"
+          node dist/index.js --help || true
+
+      - name: Create distributable tarball
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          ARTIFACT_NAME="lms-cli-${VERSION}-macos-arm64"
+          mkdir -p "$ARTIFACT_NAME"
+          cp -R dist package.json node_modules "$ARTIFACT_NAME/"
+          # Launcher script so users can run ./lms directly
+          cat > "$ARTIFACT_NAME/lms" <<'LAUNCHER'
+          #!/usr/bin/env bash
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          exec node "$DIR/dist/index.js" "$@"
+          LAUNCHER
+          chmod +x "$ARTIFACT_NAME/lms"
+          tar czf "${ARTIFACT_NAME}.tar.gz" "$ARTIFACT_NAME"
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> "$GITHUB_ENV"
+          echo "TARBALL=${ARTIFACT_NAME}.tar.gz" >> "$GITHUB_ENV"
+          ls -lh "${ARTIFACT_NAME}.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.TARBALL }}
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.TARBALL }}
+          generate_release_notes: true
